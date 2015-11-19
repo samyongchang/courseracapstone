@@ -1,0 +1,168 @@
+#################### Generate topics model
+library(topicmodels)
+ldamod <- readRDS("ldamod.RDS")
+terms(ldamod,5)
+
+
+#################### Create Mean Stars by Categories
+
+datafinal <- readRDS("DataFinal.RDS")
+
+# Convert price range to yelp categories
+datafinal$attributes.pricerange[datafinal$attributes.pricerange==1] <- "1 Price is Inexpensive "
+datafinal$attributes.pricerange[datafinal$attributes.pricerange==2] <- "2 Price is Moderate"
+datafinal$attributes.pricerange[datafinal$attributes.pricerange==3] <- "3 Price is Pricey"
+datafinal$attributes.pricerange[datafinal$attributes.pricerange==4] <- "4 Price is Ulta-High End"
+datafinal$attributes.pricerange <- factor(datafinal$attributes.pricerange, levels = c("1 Price is Inexpensive ","2 Price is Moderate","3 Price is Pricey", "4 Price is Ulta-High End"))
+
+# Rename Topic Categories
+datafinal$topic <- as.numeric(datafinal$topic)
+datafinal$topic[datafinal$topic==1] <- "Topic 1"
+datafinal$topic[datafinal$topic==2] <- "Topic 2"
+datafinal$topic[datafinal$topic==3] <- "Topic 3"
+datafinal$topic[datafinal$topic==4] <- "Topic 4"
+datafinal$topic[datafinal$topic==5] <- "Topic 5"
+datafinal$topic[datafinal$topic==6] <- "Topic 6"
+datafinal$topic[datafinal$topic==7] <- "Topic 7"
+datafinal$topic[datafinal$topic==8] <- "Topic 8"
+datafinal$topic[datafinal$topic==9] <- "Topic 9"
+datafinal$topic[datafinal$topic==10] <- "Topic 10"
+datafinal$topic[datafinal$topic==11] <- "Topic 11"
+datafinal$topic[datafinal$topic==12] <- "Topic 12"
+datafinal$topic[datafinal$topic==13] <- "Topic 13"
+datafinal$topic[datafinal$topic==14] <- "Topic 14"
+datafinal$topic[datafinal$topic==15] <- "Topic 15"
+datafinal$topic[datafinal$topic==16] <- "Topic 16"
+datafinal$topic[datafinal$topic==17] <- "Topic 17"
+datafinal$topic[datafinal$topic==18] <- "Topic 18"
+datafinal$topic[datafinal$topic==19] <- "Topic 19"
+datafinal$topic[datafinal$topic==20] <- "Topic 20"
+datafinal$topic <- factor(datafinal$topic, levels = c("Topic 2", "Topic 1", "Topic 3", "Topic 4",
+                                                      "Topic 5", "Topic 6", "Topic 7", "Topic 8",
+                                                      "Topic 9", "Topic 10", "Topic 11", "Topic 12",
+                                                      "Topic 13", "Topic 14", "Topic 15", "Topic 16",
+                                                      "Topic 17", "Topic 18", "Topic 19", "Topic 20"
+                                                      ))
+
+
+
+
+library(dplyr)
+
+
+# Cut attribute data
+data.attr <- datafinal[,c(2:4,6,9:36)]
+# Cut factor data
+data.fac <- datafinal[,c(5,7,8,37,36)]
+
+meantb <- data.frame(NULL)
+
+# For categorical data generate average stars
+for (i in 1:(length(data.attr)-1)) {
+  gp <- group_by_(data.attr, as.name(names(data.attr)[i]))
+  tb <- summarise(gp, mean(stars), sd(stars), n())
+  tb <- data.frame(tb)
+  tb <- tb[tb[,1]==1,]
+  tb[1,1] <- colnames(tb)[1]
+  names(tb) <- c("var", "meanstars", "sd", "n")
+  meantb <- rbind(tb, meantb)
+}
+
+
+for (i in 1:(length(data.fac)-1)) {
+  gp <- group_by_(data.fac, as.name(names(data.fac)[i]))
+  tb <- summarise(gp, mean(stars), sd(stars), n())
+  tb <- data.frame(tb)
+  names(tb) <- c("var", "meanstars", "sd", "n")
+  meantb <- rbind(tb, meantb)
+}
+
+avg <- data.frame("var"="Overall Average", "meanstars"=mean(datafinal$stars), "sd"= sd(datafinal$stars),"n"=dim(datafinal)[1])
+avg$ci95 <- 1.96*(avg$sd/sqrt(avg$n))
+
+meantb <- meantb[order(meantb$meanstars, decreasing=TRUE),]
+# Create 95% confidence interval band
+meantb$ci95 <- 1.96*(meantb$sd/sqrt(meantb$n))
+
+
+# Indicate if attribute is significantly above the average
+for (i in 1:dim(meantb)[1]){
+  if(abs(meantb$meanstars[i]-avg$meanstars[1]) > (meantb$ci95[i]-avg$ci95[1])) meantb$sig[i] <- 1 
+  else meantb$sig[i] <- 0
+}
+
+# Indicate if attribute difference with average
+for (i in 1:dim(meantb)[1]){
+  meantb$diff[i] <- meantb$meanstars[i]- avg$meanstars[1]
+}
+
+saveRDS(meantb, file="meantb.RDS")
+saveRDS(avg, file="avg.RDS")
+
+# Plotting
+
+library(ggplot2)
+library(gridExtra)
+meantb <- readRDS("meantb.RDS")
+avg <- readRDS("avg.RDS")
+g1 <- ggplot(meantb[1:31,], aes(y=meanstars, x=reorder(var, meanstars), fill=)) + geom_bar(stat="identity", fill="steel blue") + ylim(0,5) + geom_abline(intercept=avg$meanstars, slope=0, colour="red", size=1.5) + xlab("Attributes") + ylab("Average Stars Rating") + ggtitle("Average Stars by Attributes") + coord_flip()
+g2 <- ggplot(meantb[32:62,], aes(y=meanstars, x=reorder(var, meanstars))) + geom_bar(stat="identity", fill="steel blue") + ylim(0,5) + geom_abline(intercept=avg$meanstars, slope=0, colour="red", size=1.5) + xlab("Attributes") + ylab("Average Stars Rating") + ggtitle("Average Stars by Attributes") + coord_flip()
+grid.arrange(g1, g2, ncol=2, nrow=1)
+
+
+################################## Data with tree and plotting it
+library(rpart)
+library(rattle)
+set.seed(100)
+treef2 <- rpart(stars~., method="anova", control=rpart.control(cp=0.001) , data=datafinal[,-1])
+saveRDS(treef, file="treef.RDS")
+
+treef <- readRDS("treef.RDS")
+fancyRpartPlot(treef, cex=0.8)
+
+# Prediction accuracy
+class.pred <- table(predict(treef2), datafinal$stars)
+1-sum(diag(class.pred))/sum(class.pred)
+
+
+########################### WordCloud
+
+# Topic 2, 4 ,7, 15
+reviewfinal <- readRDS("reviewfinal.RDS")
+selected <- reviewfinal[reviewfinal$topic==2|reviewfinal$topic==4|
+                          reviewfinal$topic==7|reviewfinal$topic==7,c(4,5)]
+
+reviewtext <- readRDS("review2.RDS")
+selectedtext <- merge(x=selected, y=reviewtext, by.x="uid", by.y="uid")
+selectedtext <- selectedtext[,c(1,2,5)]
+
+
+
+# Processing new dtm for text
+library(tm)
+library(wordcloud)
+m <- list(id = "uid",content = "text")
+myReader <- readTabular(mapping = m)
+selectedcorpus <- VCorpus(DataframeSource(selectedtext), readerControl=list(reader = myReader))
+selectedcorpus = tm_map(selectedcorpus, tolower)
+selectedcorpus = tm_map(selectedcorpus, removePunctuation)
+selectedcorpus = tm_map(selectedcorpus, removeWords, c(stopwords("english"),"food","good", "great", "place","time", "restaurant", "dont", "didnt", "ive", "wasnt", "/"))
+selectedcorpus = tm_map(selectedcorpus, removeWords, stopwords("SMART"))
+selectedcorpus = tm_map(selectedcorpus, removeNumbers)
+selectedcorpus = tm_map(selectedcorpus, stemDocument)
+selectedcorpus = tm_map(selectedcorpus, stripWhitespace)
+selectedcorpus = tm_map(selectedcorpus, PlainTextDocument)
+system.time(dtm <- DocumentTermMatrix(selectedcorpus))
+saveRDS(dtm, file="dtmtopic2_4_7_15.RDS")
+
+library(slam)
+freq <- colapply_simple_triplet_matrix(dtm,sum)
+wordfreq <- data.frame(freq)
+wordfreq$word <- row.names(wordfreq)
+row.names(wordfreq) <- NULL
+saveRDS(wordfreq, file="wordfreq2_4_7_15.RDS")
+
+library(wordcloud)
+wordfreq <- readRDS("wordfreq2_4_7_15.RDS")
+wordcloud(wordfreq$word, wordfreq$freq, min.freq=1000, random.order=FALSE, random.color = FALSE)
+
