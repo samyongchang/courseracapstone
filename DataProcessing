@@ -1,0 +1,432 @@
+library(jsonlite)
+library(caret)
+library(MASS)
+library(slam)
+library(textcat)
+library(topicmodels)
+library(tm)
+
+#Optimise data by using dual core
+library(doParallel)
+registerDoParallel(cores=2)
+
+## Text mining
+
+# library(tm)
+# library(RWeka)
+# library(quanteda)
+# library(stylo)
+# library(LDA)
+
+# Reading of Biz data
+allbiz <- readRDS("biz.RDS")
+restaurants <- grepl("Restaurants", allbiz$categories)
+
+biz <- allbiz[restaurants,]
+
+
+# Flatten file by creating new columns this is done for attributes
+
+biz <- flatten(biz)
+
+#### Look for variables to remove
+
+# After checking removing these categories which may not contribute to data
+# Categories recoded seperately as TRUE and FALSE
+# Payment Type as there is little variation to be removed.
+# For Opening Hours to remove as unable to determine if valid. Notice it is not indicated for some.
+
+biz <- biz[,!grepl("Credit|Hair|Insurance|Payment|neighborhoods|full_address|city|longitude|state|latitude|type|hours|open", names(biz))]
+
+## Dealing with Missing Values
+## With the except of attributes.Wi-Fi|attributes.Attire|attributes.Noise Level|attributes.Price Range|attributes.Alcohol,
+## Missing are treated as 0 for attributes data
+
+# Picks out attributes with missing and change them to FALSE. This will later be transformed to 1 and 0
+vartoclean <- !grepl("business_id|stars|categories|review_count|name|attributes.Wi-Fi|attributes.Attire|attributes.Alcohol|attributes.Noise Level|attributes.Price Range",names(biz))
+
+for (i in names(biz)[vartoclean]) {
+  for (record in 1:dim(biz)[1]) {
+    if (is.na(biz[record,i]))
+      biz[record,i] <- FALSE
+  }
+}
+
+# attributes.Wi-Fi (free, no, paid) 7774 missing > New Cat free and no
+names(biz)[23] <- "attributes.FreeWifi"
+biz$attributes.FreeWifi <- replace(biz$attributes.FreeWifi, is.na(biz$attributes.FreeWifi), 0)
+biz$attributes.FreeWifi[biz$attributes.FreeWifi=="free"] <- 1
+biz$attributes.FreeWifi[biz$attributes.FreeWifi=="no"] <- 0
+biz$attributes.FreeWifi[biz$attributes.FreeWifi=="paid"] <- 0
+biz$attributes.FreeWifi <- as.numeric(biz$attributes.FreeWifi)
+
+
+
+# attributes.Noise Level - (average, loud, quiet, very_loud) 5279 missing > missing treat as average
+names(biz)[13] <- "attributes.noiselevel"
+biz$attributes.noiselevel <- replace(biz$attributes.noiselevel, is.na(biz$attributes.noiselevel), "average")
+biz$attributes.noiselevel <- factor(biz$attributes.noiselevel, levels = c("quiet", "average", "loud", "very_loud"))
+
+# attributes.Attire - (casual, dressy, formal) 2068 missing treat as casual
+names(biz)[15] <- "attributes.attire"
+biz$attributes.attire <- replace(biz$attributes.attire, is.na(biz$attributes.attire), "casual")
+biz$attributes.attire <- factor(biz$attributes.attire, levels = c("casual", "dressy", "formal"))
+
+# attributes.Alcohol - (beer_and_wine, full_bar, none) 3885 missing treat as none
+biz$attributes.Alcohol <- replace(biz$attributes.Alcohol, is.na(biz$attributes.Alcohol), "none")
+biz$attributes.Alcohol <- factor(biz$attributes.Alcohol, levels = c("none", "beer_and_wine", "full_bar"))
+
+# attributes.Price Range - (1 under 10, 2 , 3, 4)  1462 missing > remove missing
+names(biz)[10] <- "attributes.pricerange"
+biz <- biz[!is.na(biz$attributes.pricerange),]
+
+# Create columns for category type
+catlist <- unique(unlist(biz$categories))
+
+
+for (i in 1:length(catlist)) {
+  cat <- grepl(catlist[i], biz$categories)
+  biz[1+length(biz)] <- as.numeric(cat)
+  names(biz)[length(biz)] <- catlist[i]
+}
+
+
+# Attribute for smoking to remove as unsure what to reasonably put for missing
+table(biz$attributes.Smoking)
+
+# Corkage BYOB/Corkage to remove as unsure what the missing means
+table(biz$`attributes.BYOB/Corkage`)
+
+# Attribute for ages allow to be removed due to low variation
+table(biz$`attributes.Ages Allowed`)
+
+
+biz <- biz[,c(-2, -29,-19, -34, -69)]
+
+# Convert all logical attributes to numeric 0 for FALSE, 1 for TRUE
+for (i in 1:dim(biz)[2]){
+  if (is.logical(biz[,i]))
+    biz[,i] <- as.numeric(biz[,i])
+}
+
+# Reducing the redundant attributes Remove Variables that have NearZero Variability
+select.nzv <- nearZeroVar(biz, freqCut=95/5, uniqueCut=10, saveMetrics=FALSE)
+bizfinal <- biz[,-select.nzv]
+
+# Attributes remaining
+names(bizfinal)
+
+# Remove Food as attributes is uninformative
+bizfinal <- biz[,-36]
+names(bizfinal)[4] <- "bizstar"
+
+
+saveRDS(bizfinal,file="biz2.RDS")
+
+# Using regression to test effectiveness
+mod <- lm(bizstars~., data=bizfinal[,c(-1,-3)])
+mod2 <- stepAIC(mod, trace=FALSE, direction=("backward"))
+# Shows the final attributes selected
+summary(mod2)
+
+# Creating Table for Important Drivers
+drivers <- data.frame(mod2$coefficients)
+drivers <- data.frame(cbind(row.names(drivers), drivers[,1]), row.names=NULL)
+names(drivers) <- c("driver", "coeff")
+drivers <- drivers[-1,] # Removes the intercept
+drivers <- drivers[order(drivers[,2], decreasing = TRUE),]
+
+
+############## Handling Review Data
+
+allreview <- readRDS("review.RDS")
+bizfinal <- readRDS("biz2.RDS")
+
+# Reviews matching biz file
+select <- allreview$business_id %in% biz$business_id
+review <- allreview[select, c(4:6,8)]
+
+# Create unique IDs for better matching later
+review$uid <- seq_along(review$business_id)
+saveRDS(review, file="review2.RDS")
+
+# Created Sections
+review <- readRDS("review2.RDS")
+review1 <- review[1:150000,]
+review2 <- review[150001:250000,]
+review3 <- review[250001:350000,]
+review4 <- review[350001:450000,]
+review5 <- review[450001:550000,]
+review6 <- review[550001:650000,]
+review7 <- review[650001:750000,]
+review8 <- review[750001:850000,]
+review9 <- review[850001:984620,]
+
+# Saving the sections
+saveRDS(review1, file="reviewp1.RDS")
+saveRDS(review2, file="reviewp2.RDS")
+saveRDS(review3, file="reviewp3.RDS")
+saveRDS(review4, file="reviewp4.RDS")
+saveRDS(review5, file="reviewp5.RDS")
+saveRDS(review6, file="reviewp6.RDS")
+saveRDS(review7, file="reviewp7.RDS")
+saveRDS(review8, file="reviewp8.RDS")
+saveRDS(review9, file="reviewp9.RDS")
+
+# Identifying english responses. We'll exclude non-english
+cat1 <- textcat(review1$text) 
+cat2 <- textcat(review2$text) 
+cat3 <- textcat(review3$text) 
+cat4 <- textcat(review4$text)
+cat5 <- textcat(review4$text) 
+cat6 <- textcat(review5$text)
+cat7 <- textcat(review6$text) 
+cat8 <- textcat(review7$text)
+cat9 <- textcat(review8$text)
+
+
+cat1select <- cat1=="english"
+cat2select <- cat2=="english"
+cat3select <- cat3=="english"
+cat4select <- cat4=="english"
+cat5select <- cat5=="english"
+cat6select <- cat6=="english"
+cat7select <- cat7=="english"
+cat8select <- cat8=="english"
+cat9select <- cat9=="english"
+
+review1 <- review1[cat1select,]
+review2 <- review2[cat2select,]
+review3 <- review3[cat3select,]
+review4 <- review4[cat4select,]
+review5 <- review1[cat5select,]
+review6 <- review2[cat6select,]
+review7 <- review3[cat7select,]
+review8 <- review4[cat8select,]
+review8 <- review4[cat9select,]
+
+review.new <- rbind(review1, review2, review3, review4, review5, review6, review7, review8, review9)
+dim(review.new) # 165384 cases were removed
+
+
+##########
+
+
+# Create topics from sample data
+set.seed(100)
+corpustest <- createDataPartition(review.new$business_id, p=0.2, list=FALSE)
+traincorpus <- review.new[corpustest, ]
+remainingcorpus <- review.new[-corpustest, ]
+saveRDS(remainingcorpus, file="remainingcorpus.RDS")
+saveRDS(traincorpus, file="traincorpus.RDS")
+traincorpus <- traincorpus[, c(-1,-2,-4)]
+
+
+# Breakup remain corpus to split up the dtms
+remain1 <- remainingcorpus[1:100000,]
+remain2 <- remainingcorpus[100001:200000,]
+remain3 <- remainingcorpus[200001:300000,]
+remain4 <- remainingcorpus[300001:400000,]
+remain5 <- remainingcorpus[400001:500000,]
+remain6 <- remainingcorpus[500001:600000,]
+remain7 <- remainingcorpus[600001:648058,]
+
+saveRDS(remain1, file="remain1.RDS")
+saveRDS(remain2, file="remain2.RDS")
+saveRDS(remain3, file="remain3.RDS")
+saveRDS(remain4, file="remain4.RDS")
+saveRDS(remain5, file="remain5.RDS")
+saveRDS(remain6, file="remain6.RDS")
+saveRDS(remain7, file="remain7.RDS")
+
+
+
+
+########## Start creating LDA model 
+
+m <- list(id = "uid",content = "text")
+myReader <- readTabular(mapping = m)
+testcorpus <- VCorpus(DataframeSource(traincorpus), readerControl=list(reader = myReader))
+testcorpus = tm_map(testcorpus, tolower)
+testcorpus = tm_map(testcorpus, removePunctuation)
+testcorpus = tm_map(testcorpus, removeWords, c(stopwords("english"),"food","good", "great", "place","time", "restaurant", "dont", "didnt", "ive", "wasnt", "/"))
+testcorpus = tm_map(testcorpus, removeWords, stopwords("SMART"))
+testcorpus = tm_map(testcorpus, removeNumbers)
+testcorpus = tm_map(testcorpus, stemDocument)
+testcorpus = tm_map(testcorpus, stripWhitespace)
+testcorpus = tm_map(testcorpus, PlainTextDocument)
+system.time(dtm <- DocumentTermMatrix(testcorpus))
+
+
+# Identify documents with no terms left after cleaning and remove from dtm
+library(slam)
+freq <- rowapply_simple_triplet_matrix(dtm,sum)
+dtm.new <- dtm[freq>0,]
+saveRDS(dtm.new, file="dtm.train.RDS")
+
+# Remove the same documents from the traincorpus file
+traincorpus.new <- traincorpus[freq>0,]
+saveRDS(traincorpus.new, "traincorpus.new.RDS")
+
+# run LDA
+system.time(ldamod <- LDA(dtm.new, 20, seed=100))
+# system.time(ldamod <- LDA(test, 20, seed=100)) # took 25 min for 100K records
+saveRDS(ldamod, "ldamod.RDS")
+
+# Create final training data with topics only
+topic <- topics(ldamod)
+traincorpus.final <- traincorpus.new[,-3]
+traincorpus.final$topic <- topic
+saveRDS(traincorpus.final, file="final.traincorpus.RDS")
+
+
+remain1 <- readRDS("remain1.RDS") # done
+remain2 <- readRDS("remain2.RDS") # 99969 left
+remain3 <- readRDS("remain3.RDS") # 99979 left
+remain4 <- readRDS("remain4.RDS") # 99975 left
+remain5 <- readRDS("remain5.RDS") # 99990 left
+remain6 <- readRDS("remain6.RDS") # 99980 left
+remain7 <- readRDS("remain7.RDS") # 48042 left
+
+############### Create DTM for the remaining corpus in batches
+### This is done in batches with the code changing the name of the file
+### Looping not done due to resource usage
+
+m <- list(id = "uid",content = "text")
+myReader <- readTabular(mapping = m)
+remaincorpus <- VCorpus(DataframeSource(remain7), readerControl=list(reader = myReader))
+remaincorpus = tm_map(remaincorpus, tolower)
+remaincorpus = tm_map(remaincorpus, removePunctuation)
+remaincorpus = tm_map(remaincorpus, removeWords, c(stopwords("english"),"food","good", "great", "place","time", "restaurant", "dont", "didnt", "ive", "wasnt", "/"))
+remaincorpus = tm_map(remaincorpus, removeWords, stopwords("SMART"))
+remaincorpus = tm_map(remaincorpus, removeNumbers)
+remaincorpus = tm_map(remaincorpus, stemDocument)
+remaincorpus = tm_map(remaincorpus, stripWhitespace)
+remaincorpus = tm_map(remaincorpus, PlainTextDocument)
+system.time(dtm.remain7 <- DocumentTermMatrix(remaincorpus))
+
+
+# Identify documents with no terms left after cleaning and remove from dtm
+library(slam)
+freq <- rowapply_simple_triplet_matrix(dtm.remain7,sum)
+dtm.remain7.new <- dtm.remain7[freq>0,]
+saveRDS(dtm.remain7.new, file="dtm.remain7.RDS")
+
+# Remove the same documents from the remaining file
+remain7.new <- remain7[freq>0,]
+saveRDS(remain7.new, file="remain7.new.RDS")
+
+# Run the posterior algorithm repeatedly for 100,000 rows at a time
+# Read back dtm and finalised data
+
+dtm.remain1 <- readRDS("dtm.remain1.RDS")
+dtm.remain2 <- readRDS("dtm.remain2.RDS")
+dtm.remain3 <- readRDS("dtm.remain3.RDS")
+dtm.remain4 <- readRDS("dtm.remain4.RDS")
+dtm.remain5 <- readRDS("dtm.remain5.RDS")
+dtm.remain6 <- readRDS("dtm.remain6.RDS")
+dtm.remain7 <- readRDS("dtm.remain7.RDS")
+
+remain1.new <- readRDS("remain1.new.RDS")
+remain2.new <- readRDS("remain2.new.RDS")
+remain3.new <- readRDS("remain3.new.RDS")
+remain4.new <- readRDS("remain4.new.RDS")
+remain5.new <- readRDS("remain5.new.RDS")
+remain6.new <- readRDS("remain6.new.RDS")
+remain7.new <- readRDS("remain7.new.RDS")
+
+# for remain1
+pos <- posterior(ldamod, newdata= dtm.remain1)
+pos <- apply(pos$topics, 1 , which.max)
+remain1.final <- remain1.new[,-3]
+remain1.final$topic <- pos
+saveRDS(remain1.final, file="final.remain1.RDS")
+
+# for remain2
+pos <- posterior(ldamod, newdata= dtm.remain2)
+pos <- apply(pos$topics, 1 , which.max)
+remain2.final <- remain2.new[,-3]
+remain2.final$topic <- pos
+saveRDS(remain2.final, file="final.remain2.RDS")
+
+# for remain3
+pos <- posterior(ldamod, newdata= dtm.remain3)
+pos <- apply(pos$topics, 1 , which.max)
+remain3.final <- remain3.new[,-3]
+remain3.final$topic <- pos
+saveRDS(remain3.final, file="final.remain3.RDS")
+
+# for remain4
+pos <- posterior(ldamod, newdata= dtm.remain4)
+pos <- apply(pos$topics, 1 , which.max)
+remain4.final <- remain4.new[,-3]
+remain4.final$topic <- pos
+saveRDS(remain4.final, file="final.remain4.RDS")
+
+# for remain5
+pos <- posterior(ldamod, newdata= dtm.remain5)
+pos <- apply(pos$topics, 1 , which.max)
+remain5.final <- remain5.new[,-3]
+remain5.final$topic <- pos
+saveRDS(remain5.final, file="final.remain5.RDS") 
+
+# for remain6
+pos <- posterior(ldamod, newdata= dtm.remain6)
+pos <- apply(pos$topics, 1 , which.max)
+remain6.final <- remain6.new[,-3]
+remain6.final$topic <- pos
+saveRDS(remain6.final, file="final.remain6.RDS") 
+
+# for remain7
+pos <- posterior(ldamod, newdata= dtm.remain7)
+pos <- apply(pos$topics, 1 , which.max)
+remain7.final <- remain7.new[,-3]
+remain7.final$topic <- pos
+saveRDS(remain7.final, file="final.remain7.RDS")  
+
+# Combine all files to create the new reviewfinal file
+reviewfinal <- rbind(traincorpus.final, remain1.final, remain2.final, remain3.final, remain4.final, remain5.final, remain6.final, remain7.final)
+saveRDS(reviewfinal, file="reviewfinal.RDS")  
+
+
+## Merge all
+biz <- readRDS("biz2.RDS")
+final <- merge(biz, reviewfinal, by.x="business_id", by.y="business_id")
+saveRDS(final, file="finalmerged.RDS")
+
+# Cleaning the data we remove business_id, names, date 
+final <- final[, c(-1,-3,-41)]
+
+# makes topics a factor based on 2. Topic 1 appears to cause all relationships to be negative
+final$topic <- factor(final$topic, levels = c(2, 1, 3:20))
+
+# Remove data stars from the business level data as they are an outcome of individual stars
+final <- final[,-2]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
