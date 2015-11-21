@@ -114,14 +114,14 @@ grid.arrange(g1, g2, ncol=2, nrow=1)
 library(rpart)
 library(rattle)
 set.seed(100)
-treef2 <- rpart(stars~., method="anova", control=rpart.control(cp=0.001) , data=datafinal[,-1])
+treef <- rpart(stars~., method="anova", control=rpart.control(cp=0.001) , data=datafinal[,-1])
 saveRDS(treef, file="treef.RDS")
 
 treef <- readRDS("treef.RDS")
 fancyRpartPlot(treef, cex=0.8)
 
 # Prediction accuracy
-class.pred <- table(predict(treef2), datafinal$stars)
+class.pred <- table(predict(treef), datafinal$stars)
 1-sum(diag(class.pred))/sum(class.pred)
 
 
