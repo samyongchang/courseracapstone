@@ -2,7 +2,12 @@ from __future__ import annotations
 from typing import List
 import pandas as pd
 import numpy as np
-from scipy.stats import chi2_contingency
+try:
+    from scipy.stats import chi2_contingency  # type: ignore
+    _HAS_SCIPY = True
+except Exception:  # noqa: BLE001
+    chi2_contingency = None  # type: ignore
+    _HAS_SCIPY = False
 
 
 def format_html_table(title: str, df: pd.DataFrame, footnotes: list[str] | None = None) -> str:
@@ -53,13 +58,16 @@ def run_crosstab(df: pd.DataFrame, rows: List[str], cols: List[str]) -> str:
     inter_df = pd.concat([inter_df, totals], axis=1)
 
     # Chi-square test of independence on raw counts
-    try:
-        chi2, p, dof, expected = chi2_contingency(ct.values)
-        foot = [
-            f"Chi-square={chi2:.3f}, df={dof}, p-value={p:.4g}",
-        ]
-    except Exception as exc:  # noqa: BLE001
-        foot = [f"Chi-square could not be computed: {exc}"]
+    if _HAS_SCIPY and chi2_contingency is not None:
+        try:
+            chi2, p, dof, expected = chi2_contingency(ct.values)  # type: ignore[misc]
+            foot = [
+                f"Chi-square={chi2:.3f}, df={dof}, p-value={p:.4g}",
+            ]
+        except Exception as exc:  # noqa: BLE001
+            foot = [f"Chi-square could not be computed: {exc}"]
+    else:
+        foot = ["Chi-square requires SciPy; counts and percentages shown only."]
 
     inter_df.index.name = " x ".join(rows)
     inter_df = inter_df.sort_index()
